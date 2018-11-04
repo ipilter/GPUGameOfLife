@@ -8,7 +8,6 @@ import android.graphics.Color;
 import android.graphics.PointF;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
-import android.opengl.GLUtils;
 import android.opengl.Matrix;
 import android.util.Log;
 
@@ -21,6 +20,8 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.ShortBuffer;
 import java.util.Arrays;
+import java.util.Vector;
+
 import org.jetbrains.annotations.Nullable;
 
 import javax.microedition.khronos.opengles.GL10;
@@ -33,11 +34,11 @@ import javax.microedition.khronos.egl.EGLConfig;
 public class GOLEngine implements GLSurfaceView.Renderer {
     private static final int COORDS_PER_VERTEX = 3;
     private static final int COORDS_PER_TEXEL = 2;
-    static final int BYTES_PER_VERTEX = 4;
+    static final int BYTES_PER_COORDS = 4;
     static final int BYTES_PER_INDEX = 2;
     static final int CHANNELS_PER_PIXEL = 3;
-    static final int MAX_TEXTURE_SIZE = 4096 / 1;
-    private final int mVertexStride = COORDS_PER_VERTEX * BYTES_PER_VERTEX;
+    static final int MAX_TEXTURE_SIZE = 4096 / 16;
+    private final int mVertexStride = COORDS_PER_VERTEX * BYTES_PER_COORDS;
 
     private int mRendererProgram;
     private int mSimulatorProgram;
@@ -86,7 +87,7 @@ public class GOLEngine implements GLSurfaceView.Renderer {
     private ByteBuffer mNoiseBuffer;
 
     private float mModelSpaceHalfSize = 1.0f;
-    private int mWorldScale = 2;
+    private int mWorldScale = 1;
     private int mSeedCount = 1;
 
     private String mRendererVertexShader;
@@ -94,10 +95,73 @@ public class GOLEngine implements GLSurfaceView.Renderer {
     private String mSimulatorVertexShader;
     private String mSimulatorFragmentShader;
 
+    class Pattern {
+        private int mWidth;
+        private int mHeight;
+        private Vector<String> mData;
+        public char[] mStates = new char[] { '.', 'O' };
+
+        int powerOfTwo(int x)
+        {
+            if (x < 0)
+                return 0;
+            --x;
+            x |= x >> 1;
+            x |= x >> 2;
+            x |= x >> 4;
+            x |= x >> 8;
+            x |= x >> 16;
+            return x+1;
+        }
+
+        int max(int a, int b)
+        {
+            return a >= b ? a : b;
+        }
+
+        public Pattern(Vector<String> pattern) {
+            int size = max(powerOfTwo(pattern.size()), powerOfTwo(pattern.get(0).length()));
+
+            mWidth = size;
+            mHeight = size;
+            mData = new Vector<>(mWidth * mHeight);
+
+            int xx = mWidth - pattern.get(0).length();
+            String addition = new String(new char[xx]).replace('\0', mStates[0]);
+            for (String p : pattern)
+            {
+                mData.add(p + addition);
+//                Log.i("Pattern", mData.lastElement());
+            }
+
+            int yy = mHeight - pattern.size();
+            String row = new String(new char[mWidth]).replace('\0', mStates[0]);
+            for (int ny = 0; ny < yy; ++ny)
+            {
+                mData.add(row);
+            }
+            return;
+        }
+
+        public int getWidth() {
+            return mWidth;
+        }
+
+        public int getHeight() {
+            return mHeight;
+        }
+
+        public boolean isAlive(int x, int y) {
+            return mData.get(y).charAt(x) == mStates[1];
+        }
+    }
+    private Vector<Pattern> mPatternList;
+
+
     public GOLEngine(Context context) {
         setRules(8, 12);
 
-        ByteBuffer bb = ByteBuffer.allocateDirect(mSquareCoords.length * BYTES_PER_VERTEX);
+        ByteBuffer bb = ByteBuffer.allocateDirect(mSquareCoords.length * BYTES_PER_COORDS);
         bb.order(ByteOrder.nativeOrder());
         mVertexBuffer = bb.asFloatBuffer();
         mVertexBuffer.put(mSquareCoords);
@@ -109,7 +173,7 @@ public class GOLEngine implements GLSurfaceView.Renderer {
         mIndexBuffer.put(mIndices);
         mIndexBuffer.position(0);
 
-        ByteBuffer tbb = ByteBuffer.allocateDirect(mTextureCoords.length * BYTES_PER_VERTEX);
+        ByteBuffer tbb = ByteBuffer.allocateDirect(mTextureCoords.length * BYTES_PER_COORDS);
         tbb.order(ByteOrder.nativeOrder());
         mTexelBuffer = tbb.asFloatBuffer();
         mTexelBuffer.put(mTextureCoords);
@@ -122,28 +186,63 @@ public class GOLEngine implements GLSurfaceView.Renderer {
         mGridWidth = MAX_TEXTURE_SIZE / mWorldScale;
         mGridHeight = MAX_TEXTURE_SIZE / mWorldScale;
 
+//        try
+//        {
+//            InputStream iStream = context.getAssets().open("InitialState.png");
+//            Bitmap bitmap = BitmapFactory.decodeStream(iStream);
+//            setInitialState(bitmap);
+//        }
+//        catch (IOException ex)
+//        {
+//            Log.e("GOLEngine", ex.getMessage());
+//            return;
+//        }
+//
+//        try
+//        {
+//            InputStream iStream = context.getAssets().open("Noise.png");
+//            Bitmap bitmap = BitmapFactory.decodeStream(iStream);
+//            setNoise(bitmap);
+//        }
+//        catch (IOException ex)
+//        {
+//            Log.e("GOLEngine", ex.getMessage());
+//            return;
+//        }
+        mPatternList = new Vector<>();
         try
         {
-            InputStream iStream = context.getAssets().open("InitialState.png");
-            Bitmap bitmap = BitmapFactory.decodeStream(iStream);
-            setInitialState(bitmap);
-        }
-        catch (IOException ex)
-        {
-            Log.e("GOLEngine", ex.getMessage());
-            return;
-        }
+            {
+                InputStream iStream = context.getAssets().open("noise.patt");
 
-        try
-        {
-            InputStream iStream = context.getAssets().open("Noise.png");
-            Bitmap bitmap = BitmapFactory.decodeStream(iStream);
-            setNoise(bitmap);
+                BufferedReader r = new BufferedReader(new InputStreamReader(iStream));
+                Vector<String> stringList = new Vector<>();
+                for (String line; (line = r.readLine()) != null; ) {
+                    if(line.isEmpty())
+                        continue;
+                    stringList.add(line);
+                }
+
+                mPatternList.add(new Pattern(stringList));
+                setNoise(mPatternList.get(0));
+            }
+
+            {
+                InputStream iStream = context.getAssets().open("initialstate.patt");
+
+                BufferedReader r = new BufferedReader(new InputStreamReader(iStream));
+                Vector<String> stringList = new Vector<>();
+                for (String line; (line = r.readLine()) != null; ) {
+                    if(line.isEmpty())
+                        continue;
+                    stringList.add(line);
+                }
+
+                mPatternList.add(new Pattern(stringList));
+                setInitialState(mPatternList.get(1));
+            }
         }
-        catch (IOException ex)
-        {
-            Log.e("GOLEngine", ex.getMessage());
-            return;
+        catch (IOException ex) {
         }
 
         mRendererVertexShader = loadShader(context.getAssets(), "renderer.vsh");
@@ -259,9 +358,10 @@ public class GOLEngine implements GLSurfaceView.Renderer {
                 if(Color.red(bitmap.getPixel(x, wY - 1 - y)) == 255)
                 {
                     int offset = (sX + x) * CHANNELS_PER_PIXEL + (sY + y) * mGridWidth * CHANNELS_PER_PIXEL;
-                    initialData[offset] = (byte)255;
-                    initialData[offset + 1] = (byte)255;
-                    initialData[offset + 2] = (byte)255;
+                    for(int i = 0; i < CHANNELS_PER_PIXEL; ++i)
+                    {
+                        initialData[offset + i] = (byte)255;
+                    }
                 }
             }
         }
@@ -330,6 +430,54 @@ public class GOLEngine implements GLSurfaceView.Renderer {
         GLES20.glViewport(0, 0, mWidth, mHeight);
     }
 
+    public void setInitialState(Pattern pattern) {
+        int size = mGridWidth * mGridHeight * CHANNELS_PER_PIXEL;
+        byte initialData[] = new byte[size];
+        Arrays.fill(initialData, (byte) 0);
+
+        int wX = pattern.getWidth();
+        int wY = pattern.getHeight();
+        int sX = (mGridWidth / 2) - (wX / 2);
+        int sY = (mGridHeight / 2) - (wY / 2);
+        for (int x = 0; x < wX; ++x) {
+            for (int y = 0; y < wY; ++y) {
+                if (pattern.isAlive(x, pattern.getHeight() - y - 1)) {
+                    int offset = (sX + x) * CHANNELS_PER_PIXEL + (sY + y) * mGridWidth * CHANNELS_PER_PIXEL;
+                    for (int i = 0; i < CHANNELS_PER_PIXEL; ++i) {
+                        initialData[offset + i] = (byte) 255;
+                    }
+                }
+            }
+        }
+        mInitialState = ByteBuffer.allocateDirect(size);
+        mInitialState.order(ByteOrder.nativeOrder());
+        mInitialState.put(initialData);
+        mInitialState.position(0);
+    }
+
+    private void setNoise(Pattern pattern) {
+        mNoiseWidth = pattern.getWidth();
+        mNoiseHeight = pattern.getHeight();
+        int size = mNoiseWidth * mNoiseHeight * CHANNELS_PER_PIXEL;
+        byte noiseData[] = new byte[size];
+        Arrays.fill(noiseData, (byte) 0);
+
+        for (int y = 0; y < mNoiseHeight; ++y) {
+            for (int x = 0; x < mNoiseWidth; ++x) {
+                if (pattern.isAlive(x, mNoiseHeight - 1 - y)) {
+                    int offset = x * CHANNELS_PER_PIXEL + (y * mNoiseWidth * CHANNELS_PER_PIXEL);
+                    for (int i = 0; i < CHANNELS_PER_PIXEL; ++i) {
+                        noiseData[offset + i] = (byte) 255;
+                    }
+                }
+            }
+        }
+        mNoiseBuffer = ByteBuffer.allocateDirect(size);
+        mNoiseBuffer.order(ByteOrder.nativeOrder());
+        mNoiseBuffer.put(noiseData);
+        mNoiseBuffer.position(0);
+    }
+
     private void render()
     {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -386,9 +534,11 @@ public class GOLEngine implements GLSurfaceView.Renderer {
                 if(Color.red(bitmap.getPixel(x, mNoiseHeight - 1 - y)) == 255)
                 {
                     int offset = x * CHANNELS_PER_PIXEL + y * mNoiseWidth * CHANNELS_PER_PIXEL;
-                    noiseData[offset] = (byte)255;
-                    noiseData[offset + 1] = (byte)255;
-                    noiseData[offset + 2] = (byte)255;
+                    for(int i = 0; i < CHANNELS_PER_PIXEL; ++i)
+                    {
+                        noiseData[offset + i] = (byte)255;
+                    }
+
                 }
             }
         }
